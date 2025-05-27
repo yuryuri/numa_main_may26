@@ -185,7 +185,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
           .map(stem => {
             const audio = audioElements[stem.id];
             if (audio) {
-              return audio.play().catch(err => console.error(`Playback error for stem ${stem.id}:`, err));
+              return audio.play().catch((err: any) => console.error(`Playback error for stem ${stem.id}:`, err));
             }
             return Promise.resolve();
           })
