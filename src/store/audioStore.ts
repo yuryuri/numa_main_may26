@@ -61,16 +61,6 @@ interface AudioStore {
   seekTo: (time: number) => void;
 }
 
-// Using static MP3 files from a reliable CDN that has proper CORS headers
-// GitHub Pages URLs are reliable and have appropriate CORS headers
-const SAMPLE_AUDIO_URLS = {
-  // Using GitHub raw content URLs (reliable with CORS support)
-  drums: 'https://freesound.org/data/previews/476/476176_9876687-lq.mp3',
-  vocals: 'https://freesound.org/data/previews/415/415362_7866507-lq.mp3',
-  bass: 'https://freesound.org/data/previews/320/320539_5260872-lq.mp3',
-  other: 'https://freesound.org/data/previews/617/617306_1735785-lq.mp3'
-};
-
 export const useAudioStore = create<AudioStore>((set, get) => ({
   // Initial state
   ytUrl: null,
@@ -185,7 +175,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
           .map(stem => {
             const audio = audioElements[stem.id];
             if (audio) {
-              return audio.play().catch((err: any) => console.error(`Playback error for stem ${stem.id}:`, err));
+              return audio.play().catch((err: Error) => console.error(`Playback error for stem ${stem.id}:`, err));
             }
             return Promise.resolve();
           })
