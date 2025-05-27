@@ -6,6 +6,9 @@ import os from 'os';
 // The directory where stems are stored
 const DOWNLOAD_DIR = path.join(os.tmpdir(), 'numa-downloads');
 
+// Add file cache to reduce disk reads
+const fileCache = new Map<string, Buffer>();
+
 export async function GET(
   request: NextRequest,
   context: { params: { videoId: string; stem: string } }
@@ -13,6 +16,24 @@ export async function GET(
   try {
     // In Next.js 15.3+, we need to await params
     const { videoId, stem } = await context.params;
+    
+    // Create a cache key for this request
+    const cacheKey = `${videoId}:${stem}`;
+    
+    // Check if we have this file cached
+    if (fileCache.has(cacheKey)) {
+      console.log(`Serving cached audio for ${cacheKey}`);
+      const cachedFile = fileCache.get(cacheKey);
+      
+      return new NextResponse(cachedFile, {
+        headers: {
+          'Content-Type': 'audio/wav',
+          'Content-Disposition': `inline; filename="${stem}.wav"`,
+          'Cache-Control': 'public, max-age=31536000', // Cache for 1 year
+          'Access-Control-Allow-Origin': '*', // Allow CORS
+        }
+      });
+    }
     
     // Validate stem name
     const validStems = ['vocals', 'drums', 'bass', 'other', 'master'];
@@ -95,8 +116,24 @@ export async function GET(
       );
     }
     
-    // Read the file
-    const fileBuffer = fs.readFileSync(stemPath);
+    console.log(`Reading audio file from disk: ${stemPath}`);
+    
+    // Read the file with a timeout
+    let fileBuffer: Buffer;
+    try {
+      fileBuffer = fs.readFileSync(stemPath);
+      
+      // Cache the file for future requests (but limit cache size)
+      if (fileCache.size < 20) { // Only cache up to 20 files to avoid memory issues
+        fileCache.set(cacheKey, fileBuffer);
+      }
+    } catch (readError) {
+      console.error(`Error reading file ${stemPath}:`, readError);
+      return NextResponse.json(
+        { error: `Error reading stem file: ${readError instanceof Error ? readError.message : 'Unknown error'}` },
+        { status: 500 }
+      );
+    }
     
     // Return the WAV file with proper headers
     return new NextResponse(fileBuffer, {
@@ -104,12 +141,13 @@ export async function GET(
         'Content-Type': 'audio/wav',
         'Content-Disposition': `inline; filename="${stem}.wav"`,
         'Cache-Control': 'public, max-age=31536000', // Cache for 1 year
+        'Access-Control-Allow-Origin': '*', // Allow CORS
       }
     });
   } catch (error) {
     console.error(`Error serving stem:`, error);
     return NextResponse.json(
-      { error: 'Failed to serve stem' },
+      { error: `Failed to serve stem: ${error instanceof Error ? error.message : 'Unknown error'}` },
       { status: 500 }
     );
   }

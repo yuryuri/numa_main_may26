@@ -15,7 +15,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tone": "^15.1.22",
-    "wavesurfer.js": "^7.9.5",
+    "wavesurfer.js": "^7.7.3",
     "ytdl-core": "^4.11.5",
     "zustand": "^5.0.4"
   },

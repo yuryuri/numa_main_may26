@@ -39,19 +39,41 @@ body {
 .slider-thumb::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 20px;
-  height: 20px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: var(--primary);
   cursor: pointer;
+  box-shadow: 0 0 5px rgba(99, 102, 241, 0.5);
+  border: 2px solid #fff;
+  margin-top: -4px;
 }
 
 .slider-thumb::-moz-range-thumb {
-  width: 20px;
-  height: 20px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: var(--primary);
   cursor: pointer;
+  box-shadow: 0 0 5px rgba(99, 102, 241, 0.5);
+  border: 2px solid #fff;
+}
+
+.slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider-thumb::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.slider-thumb::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
 }
 
 .waveform-container {

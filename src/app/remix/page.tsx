@@ -10,15 +10,18 @@ import {
   ArrowPathIcon,
   ChevronLeftIcon,
   MusicalNoteIcon,
-  ExclamationCircleIcon
+  ExclamationCircleIcon,
+  ArrowDownTrayIcon
 } from "@heroicons/react/24/solid";
 import Link from "next/link";
 import { useAudioStore } from "@/store/audioStore";
+import WaveformVisualizer from '../components/WaveformVisualizer';
 
 export default function RemixPage() {
   const searchParams = useSearchParams();
   const ytUrl = searchParams.get("url") || "";
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [selectedStem, setSelectedStem] = useState<string | null>(null);
   
   // Get state from store
   const { 
@@ -28,12 +31,14 @@ export default function RemixPage() {
     songTitle, 
     error,
     stems,
+    currentTime,
     setPlaying,
     toggleStem,
     adjustStemVolume,
     processYoutubeUrl,
     playAllStems, 
-    pauseAllStems
+    pauseAllStems,
+    seekTo
   } = useAudioStore();
   
   // Refs
@@ -81,6 +86,33 @@ export default function RemixPage() {
       setAudioError("Could not play audio. Please try again.");
     }
   };
+  
+  // Handle time updates from any waveform
+  const handleTimeUpdate = (time: number, stemId: string) => {
+    if (Math.abs(time - currentTime) > 0.1) {
+      seekTo(time);
+      setSelectedStem(stemId);
+    }
+  };
+  
+  // When currentTime changes globally, update all stems except the one that triggered it
+  useEffect(() => {
+    if (selectedStem && isPlaying) {
+      // Get audio elements
+      const audioElements = (window as any).audioElements;
+      if (!audioElements) return;
+      
+      // Synchronize all other stems to the currentTime
+      Object.entries(audioElements).forEach(([stemId, audio]: [string, any]) => {
+        if (stemId !== selectedStem && audio instanceof HTMLAudioElement) {
+          // Only adjust if the difference is significant (>100ms)
+          if (Math.abs(audio.currentTime - currentTime) > 0.1) {
+            audio.currentTime = currentTime;
+          }
+        }
+      });
+    }
+  }, [currentTime, selectedStem, isPlaying]);
   
   // Apply natural language instruction
   const applyInstruction = (e: React.FormEvent<HTMLFormElement>) => {
@@ -139,6 +171,53 @@ export default function RemixPage() {
   // Calculate if any stems are still loading
   const stemsLoading = stems.some(stem => !stem.loaded);
   const allStemsLoaded = stems.length > 0 && stems.every(stem => stem.loaded);
+  
+  // Toggle specific stem playback
+  const toggleStemMute = (stemId: string) => {
+    // Get audio elements
+    const audioElements = (window as any).audioElements;
+    if (!audioElements) return;
+
+    const audio = audioElements[stemId];
+    if (!audio) return;
+
+    // Toggle this specific stem only
+    const stem = stems.find(s => s.id === stemId);
+
+    if (!stem) return;
+
+    // Use the gainNodes to effectively mute/unmute this stem
+    const gainNodes = (window as any).gainNodes;
+    if (!gainNodes || !gainNodes[stemId]) return;
+
+    // Toggle active state for this specific stem
+    const updatedStems = stems.map(s => 
+      s.id === stemId ? { ...s, active: !s.active } : s
+    );
+
+    // Apply the change to the gain node
+    const audioContext = (window as any).audioContext;
+    const gainNode = gainNodes[stemId];
+    const now = audioContext?.currentTime || 0;
+
+    // Update the gain to reflect active state (opposite of current state since we're toggling)
+    if (stem.active) {
+      // Muting - set to 0
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(0, now);
+      audio.volume = 0;
+    } else {
+      // Unmuting - set to volume level
+      const safeVolume = Math.max(stem.volume, 0.0001);
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(safeVolume, now);
+      audio.volume = safeVolume;
+    }
+
+    
+    // Update state
+    toggleStem(stemId);
+  };
   
   if (!ytUrl) {
     return (
@@ -221,20 +300,61 @@ export default function RemixPage() {
           )}
           
           {/* Waveform visualization */}
-          <div 
-            ref={waveformRef}
-            className="waveform-container mb-4"
-          >
-            <div className="flex h-full items-center justify-center">
-              <MusicalNoteIcon className="w-8 h-8 text-gray-600" />
-              <span className="text-gray-600 ml-2">
-                {isPlaying 
-                  ? "Now Playing..." 
-                  : allStemsLoaded 
-                    ? "Ready to Play"
-                    : "Loading Audio..."}
-              </span>
-            </div>
+          <div className="space-y-4 mb-6">
+            {stems.map((stem) => (
+              <div key={stem.id} className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium capitalize">{stem.id}</h3>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleStem(stem.id)}
+                      className={`p-1 rounded ${
+                        stem.active ? 'bg-indigo-600' : 'bg-gray-700'
+                      }`}
+                    >
+                      {stem.active ? (
+                        <SpeakerWaveIcon className="w-4 h-4" />
+                      ) : (
+                        <SpeakerXMarkIcon className="w-4 h-4" />
+                      )}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={stem.volume}
+                      onChange={(e) => adjustStemVolume(stem.id, parseFloat(e.target.value))}
+                      className="w-24 slider-thumb accent-indigo-500"
+                      style={{
+                        backgroundImage: `linear-gradient(to right, ${stem.color}80 ${stem.volume * 100}%, #374151 ${stem.volume * 100}%)`,
+                        height: '6px',
+                        borderRadius: '4px',
+                        outline: 'none'
+                      }}
+                    />
+                    <a
+                      href={stem.url}
+                      download={`${songTitle || 'song'}-${stem.id}.wav`}
+                      className="p-1 rounded bg-gray-700 hover:bg-gray-600"
+                      title={`Download ${stem.id} stem`}
+                    >
+                      <ArrowDownTrayIcon className="w-4 h-4" />
+                    </a>
+                  </div>
+                </div>
+                <WaveformVisualizer
+                  audioUrl={stem.url}
+                  isPlaying={isPlaying && stem.active}
+                  onTimeUpdate={(time) => handleTimeUpdate(time, stem.id)}
+                  color={stem.id === 'vocals' ? '#ef4444' : 
+                         stem.id === 'drums' ? '#22c55e' :
+                         stem.id === 'bass' ? '#3b82f6' :
+                         '#6366f1'}
+                  stemId={stem.id}
+                />
+              </div>
+            ))}
           </div>
           
           {/* Playback controls */}
@@ -254,52 +374,6 @@ export default function RemixPage() {
                 <PlayIcon className="w-6 h-6" />
               )}
             </button>
-          </div>
-          
-          {/* Stems controls */}
-          <h2 className="text-lg font-medium mb-3">Stems</h2>
-          <div className="space-y-4 mb-8">
-            {stems.map(stem => (
-              <div key={stem.id} className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div 
-                      className={`w-3 h-3 rounded-full ${stem.loaded ? '' : 'animate-pulse'}`}
-                      style={{ backgroundColor: stem.color }}
-                    ></div>
-                    <span className="font-medium">
-                      {stem.name} 
-                      {!stem.loaded && <span className="text-xs text-gray-400 ml-1">(loading)</span>}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => toggleStem(stem.id)}
-                    className="p-1.5 rounded-full hover:bg-gray-800"
-                    disabled={!stem.loaded}
-                  >
-                    {stem.active ? (
-                      <SpeakerWaveIcon className="w-5 h-5 text-gray-300" />
-                    ) : (
-                      <SpeakerXMarkIcon className="w-5 h-5 text-gray-500" />
-                    )}
-                  </button>
-                </div>
-                <input 
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={stem.volume}
-                  onChange={(e) => adjustStemVolume(stem.id, parseFloat(e.target.value))}
-                  disabled={!stem.active || !stem.loaded}
-                  className="w-full slider-thumb"
-                  style={{ 
-                    accentColor: stem.color,
-                    opacity: (stem.active && stem.loaded) ? 1 : 0.5
-                  }}
-                />
-              </div>
-            ))}
           </div>
           
           {/* Natural language controls */}
@@ -322,4 +396,4 @@ export default function RemixPage() {
       )}
     </main>
   );
-} 
+}

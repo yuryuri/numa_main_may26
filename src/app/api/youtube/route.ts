@@ -16,6 +16,9 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
+// Add cache to prevent re-processing the same URL
+const processedVideos = new Map<string, any>();
+
 export async function GET(request: NextRequest) {
   // Get YouTube URL from query params
   const searchParams = request.nextUrl.searchParams;
@@ -40,29 +43,86 @@ export async function GET(request: NextRequest) {
       );
     }
     
+    // Check if we already processed this video
+    if (processedVideos.has(videoId)) {
+      console.log(`Using cached result for video ID: ${videoId}`);
+      return NextResponse.json(processedVideos.get(videoId));
+    }
+    
     // Create a directory for this video
     const videoDir = path.join(DOWNLOAD_DIR, videoId);
     if (!fs.existsSync(videoDir)) {
       fs.mkdirSync(videoDir, { recursive: true });
     }
     
-    // Download the audio from YouTube
-    const wavFilePath = await downloadYouTubeAudio(youtubeUrl, videoDir);
+    // Check if stems already exist for this video
+    const stemDir = path.join(videoDir, 'stems', 'htdemucs');
+    if (fs.existsSync(stemDir)) {
+      const folders = fs.readdirSync(stemDir);
+      if (folders.length > 0) {
+        const trackFolder = path.join(stemDir, folders[0]);
+        const stemFiles = ['vocals.wav', 'drums.wav', 'bass.wav', 'other.wav'];
+        
+        if (stemFiles.every(file => fs.existsSync(path.join(trackFolder, file)))) {
+          console.log(`Found existing stems for video ${videoId}, using them`);
+          
+          const result = {
+            videoId,
+            title: folders[0],
+            masterAudio: `/api/stems/${videoId}/master`,
+            stems: {
+              vocals: `/api/stems/${videoId}/vocals`,
+              drums: `/api/stems/${videoId}/drums`,
+              bass: `/api/stems/${videoId}/bass`,
+              other: `/api/stems/${videoId}/other`,
+              usedFallback: 'false'
+            }
+          };
+          
+          // Store in cache
+          processedVideos.set(videoId, result);
+          
+          return NextResponse.json(result);
+        }
+      }
+    }
     
-    // Separate the stems using Demucs
+    // Download the audio from YouTube with timeout
+    const wavFilePath = await Promise.race([
+      downloadYouTubeAudio(youtubeUrl, videoDir),
+      new Promise<string>((_, reject) => {
+        setTimeout(() => reject(new Error('YouTube download timed out after 180 seconds')), 180000);
+      }) as Promise<string>
+    ]);
+    
+    // Separate the stems using Demucs with timeout
     console.log('Separating audio stems...');
-    const stemPaths = await separateStems(wavFilePath, videoId);
     
-    return NextResponse.json({
+    const stemPaths = await Promise.race([
+      separateStems(wavFilePath, videoId),
+      new Promise<Record<string, string>>((_, reject) => {
+        setTimeout(() => reject(new Error('Stem separation timed out after 180 seconds')), 180000);
+      }) as Promise<Record<string, string>>
+    ]);
+    
+    const result = {
       videoId,
       title: path.basename(wavFilePath, path.extname(wavFilePath)),
       masterAudio: `/api/stems/${videoId}/master`,
       stems: stemPaths
-    });
+    };
+    
+    // Store in cache
+    processedVideos.set(videoId, result);
+    
+    return NextResponse.json(result);
   } catch (error) {
     console.error('Error processing YouTube URL:', error);
+    
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
     return NextResponse.json(
-      { error: 'Failed to process YouTube URL' },
+      { error: `Failed to process YouTube URL: ${errorMessage}` },
       { status: 500 }
     );
   }
@@ -81,8 +141,8 @@ function extractYouTubeId(url: string): string | null {
 async function downloadYouTubeAudio(youtubeUrl: string, outputDir: string): Promise<string> {
   console.log('Starting YouTube download...');
   
-  // Use yt-dlp to download audio only and convert to WAV
-  const ytDlCommand = `yt-dlp -x --audio-format wav --audio-quality 0 -o "%(title)s.%(ext)s" "${youtubeUrl}"`;
+  // Use yt-dlp to download audio only and convert to WAV with improved networking options
+  const ytDlCommand = `yt-dlp -x --audio-format wav --audio-quality 0 --retries 5 --fragment-retries 5 --force-ipv4 --extract-audio --no-check-certificate -o "%(title)s.%(ext)s" "${youtubeUrl}"`;
   console.log(`Executing: ${ytDlCommand}`);
   
   try {
@@ -132,10 +192,19 @@ async function separateStems(wavFilePath: string, videoId: string): Promise<Reco
     other: path.join(finalStemDir, 'other.wav')
   };
   
+  let usedFallback = false;
+  
   try {
-    // HARDCODED ABSOLUTE PATH to demucs - this is guaranteed to work
+    // Use the correct path to demucs that we just verified
     const demucsPath = '/Volumes/T7/Dev/numa-main/numa-env/bin/demucs';
-    console.log("Using demucs at absolute path:", demucsPath);
+    
+    // Check if demucs exists
+    if (!fs.existsSync(demucsPath)) {
+      console.error(`Demucs not found at path: ${demucsPath}`);
+      throw new Error('Demucs executable not found');
+    }
+    
+    console.log("Using demucs at path:", demucsPath);
     
     // Set environment variables to force sox backend
     const env = {
@@ -144,8 +213,8 @@ async function separateStems(wavFilePath: string, videoId: string): Promise<Reco
       TORCHAUDIO_DEBUG: "1" // Enable debug logging
     };
     
-    // Simple command with absolute paths everywhere
-    const demucsCmd = `${demucsPath} --backend sox "${wavFilePath}" -o "${stemDir}"`;
+    // Use correct Demucs command format (without --backend flag)
+    const demucsCmd = `${demucsPath} "${wavFilePath}" -o "${stemDir}"`;
     console.log(`Executing command: ${demucsCmd}`);
     
     const { stdout, stderr } = await execPromise(demucsCmd, { env });
@@ -157,16 +226,22 @@ async function separateStems(wavFilePath: string, videoId: string): Promise<Reco
     if (!stemsExist) {
       throw new Error('Not all stems were created by Demucs');
     }
+    
+    console.log('✅ Demucs separation succeeded!');
   } catch (error) {
     console.error('Error separating stems with Demucs:', error);
     
-    // Fallback: Copy the original file to all stem files if Demucs fails
+    // Enable fallback: Copy the original file to all stem files if Demucs fails
     console.log('Falling back to using original audio for all stems');
+    usedFallback = true;
+    
+    // Create each stem file by copying the original audio
     for (const stemFile of Object.values(stemFiles)) {
-      // Create a hard link to the original file for each stem to save space
+      // Create a copy of the original file for each stem to ensure separate playback
       if (!fs.existsSync(stemFile)) {
         try {
           fs.copyFileSync(wavFilePath, stemFile);
+          console.log(`Created fallback stem file: ${stemFile}`);
         } catch (copyError) {
           console.error(`Error creating stem fallback file ${stemFile}:`, copyError);
         }
@@ -174,11 +249,12 @@ async function separateStems(wavFilePath: string, videoId: string): Promise<Reco
     }
   }
   
-  // Return the API routes for each stem
+  // Return the API routes for each stem and indicate if fallback was used
   return {
     vocals: `/api/stems/${videoId}/vocals`,
     drums: `/api/stems/${videoId}/drums`,
     bass: `/api/stems/${videoId}/bass`,
-    other: `/api/stems/${videoId}/other`
+    other: `/api/stems/${videoId}/other`,
+    usedFallback: usedFallback ? 'true' : 'false'
   };
 } 
